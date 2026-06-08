@@ -2,7 +2,7 @@
   "name": "@foony/global-store",
   "version": "0.0.1",
   "description": "Small React global store utility for Foony apps.",
-  "license": "GPL-3.0-only",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Foony-Limited/global-store.git"
