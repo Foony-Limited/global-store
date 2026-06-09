@@ -13,210 +13,156 @@ function resolveInitialState<State extends object>(initialState: State | (() => 
 }
 
 /**
- * Holds global state and notifies active key/all listeners on changes.
- */
-class GlobalStore<State extends object> {
-  private state: State;
-  private readonly getInitialState: () => State;
-  private readonly keyListeners = new Map<keyof State, Set<KeyListener>>();
-  private readonly reactKeyListeners = new Map<keyof State, Set<KeyListener>>();
-  private readonly allListeners = new Set<() => void>();
-
-  constructor(initialState: State | (() => State)) {
-    this.state = resolveInitialState(initialState);
-    this.getInitialState = typeof initialState === 'function' ? initialState as () => State : () => cloneDeep(initialState);
-  }
-
-  getState(): State {
-    return this.state;
-  }
-
-  private notifyKey<K extends keyof State>(key: K, newValue: State[K] | undefined, previousValue: State[K] | undefined): void {
-    if (!Object.is(newValue, previousValue)) {
-      this.keyListeners.get(key)?.forEach(listener => listener(newValue, previousValue));
-    }
-  }
-
-  private notifyReactKey<K extends keyof State>(key: K, newValue: State[K] | undefined, previousValue: State[K] | undefined): void {
-    if (!Object.is(newValue, previousValue)) {
-      this.reactKeyListeners.get(key)?.forEach(listener => listener(newValue, previousValue));
-    }
-  }
-
-  private notifyAll(): void {
-    this.allListeners.forEach(listener => listener());
-  }
-
-  set<K extends keyof State>(key: K, value: SetStateAction<State[K]>): void {
-    const previousValue = this.state[key];
-    const newValue = isSetter(value) ? value(previousValue) : value;
-    this.state = {...this.state, [key]: newValue} as State;
-    this.notifyReactKey(key, newValue, previousValue);
-    this.notifyKey(key, newValue, previousValue);
-    this.notifyAll();
-  }
-
-  setAll(nextState: State): void {
-    const previousState = this.state;
-    if (!Object.is(nextState, previousState)) {
-      this.state = nextState;
-      for (const key of this.reactKeyListeners.keys()) {
-        this.notifyReactKey(key, key in nextState ? nextState[key] : undefined, key in previousState ? previousState[key] : undefined);
-      }
-      this.notifyAll();
-    }
-    for (const key of this.keyListeners.keys()) {
-      this.notifyKey(key, key in nextState ? nextState[key] : undefined, key in previousState ? previousState[key] : undefined);
-    }
-  }
-
-  update(partialState: Partial<State>): void {
-    const previousState = this.state;
-    const keys = Object.keys(partialState) as (keyof State)[];
-    if (!Object.is(partialState, previousState)) {
-      this.state = {...this.state, ...partialState};
-      for (const key of keys) {
-        this.notifyReactKey(key, this.state[key], previousState[key]);
-      }
-      this.notifyAll();
-    }
-    for (const key of keys) {
-      this.notifyKey(key, key in partialState ? partialState[key] : undefined, previousState[key]);
-    }
-  }
-
-  delete<K extends keyof State>(key: K): void {
-    if (!(key in this.state)) {
-      return;
-    }
-    const previousValue = this.state[key];
-    const nextState = {...this.state};
-    delete nextState[key];
-    this.state = nextState as State;
-    this.notifyReactKey(key, undefined, previousValue);
-    this.notifyKey(key, undefined, previousValue);
-    this.notifyAll();
-  }
-
-  reset(): void {
-    const previousState = this.state;
-    this.state = this.getInitialState();
-    for (const key of this.reactKeyListeners.keys()) {
-      this.notifyReactKey(key, key in this.state ? this.state[key] : undefined, key in previousState ? previousState[key] : undefined);
-    }
-    for (const key of this.keyListeners.keys()) {
-      this.notifyKey(key, key in this.state ? this.state[key] : undefined, key in previousState ? previousState[key] : undefined);
-    }
-    this.notifyAll();
-  }
-
-  get<K extends keyof State>(key: K): State[K] {
-    return this.state[key];
-  }
-
-  getAll(): State {
-    return this.state;
-  }
-
-  has<K extends keyof State>(key: K): boolean {
-    return key in this.state;
-  }
-
-  on<K extends keyof State>(key: K, callback: (state: State[K] | undefined, previousState: State[K] | undefined) => void): () => void {
-    if (!this.keyListeners.has(key)) {
-      this.keyListeners.set(key, new Set());
-    }
-    const listener = callback as KeyListener;
-    this.keyListeners.get(key)?.add(listener);
-    return () => {
-      this.keyListeners.get(key)?.delete(listener);
-    };
-  }
-
-  subscribeToKey<K extends keyof State>(key: K, callback: (state: State[K] | undefined, previousState: State[K] | undefined) => void): () => void {
-    if (!this.reactKeyListeners.has(key)) {
-      this.reactKeyListeners.set(key, new Set());
-    }
-    const listener = callback as KeyListener;
-    this.reactKeyListeners.get(key)?.add(listener);
-    return () => {
-      this.reactKeyListeners.get(key)?.delete(listener);
-    };
-  }
-
-  off<K extends keyof State>(key: K, callback?: (state: State[K] | undefined, previousState: State[K] | undefined) => void): void {
-    if (!callback) {
-      this.keyListeners.delete(key);
-      return;
-    }
-    this.keyListeners.get(key)?.delete(callback as KeyListener);
-  }
-
-  subscribeToAll(callback: () => void): () => void {
-    this.allListeners.add(callback);
-    return () => {
-      this.allListeners.delete(callback);
-    };
-  }
-}
-
-/**
  * Creates a small global state container with React subscriptions for shared state across components.
  */
 export function createGlobalStore<State extends object>(initialState: State | (() => State)) {
-  const store = new GlobalStore<State>(initialState);
+  let state = resolveInitialState(initialState);
+  const getInitialState = typeof initialState === 'function' ? initialState as () => State : () => cloneDeep(initialState);
+  const keyListeners = new Map<keyof State, Set<KeyListener>>();
+  const reactKeyListeners = new Map<keyof State, Set<KeyListener>>();
+  const allListeners = new Set<() => void>();
 
-  function setter<K extends keyof State>(key: K, value: SetStateAction<State[K]>): void {
-    store.set(key, value);
+  function notifyKey<K extends keyof State>(key: K, newValue: State[K] | undefined, previousValue: State[K] | undefined): void {
+    if (!Object.is(newValue, previousValue)) {
+      keyListeners.get(key)?.forEach(listener => listener(newValue, previousValue));
+    }
+  }
+
+  function notifyReactKey<K extends keyof State>(key: K, newValue: State[K] | undefined, previousValue: State[K] | undefined): void {
+    if (!Object.is(newValue, previousValue)) {
+      reactKeyListeners.get(key)?.forEach(listener => listener(newValue, previousValue));
+    }
+  }
+
+  function notifyAll(): void {
+    if (allListeners.size) {
+      allListeners.forEach(listener => listener());
+    }
+  }
+
+  function set<K extends keyof State>(key: K, value: SetStateAction<State[K]>): void {
+    const previousValue = state[key];
+    const newValue = isSetter(value) ? value(previousValue) : value;
+    state = {...state, [key]: newValue} as State;
+    notifyReactKey(key, newValue, previousValue);
+    notifyKey(key, newValue, previousValue);
+    notifyAll();
+  }
+
+  function subscribeToKey<K extends keyof State>(key: K, callback: (state: State[K] | undefined, previousState: State[K] | undefined) => void): () => void {
+    if (!reactKeyListeners.has(key)) {
+      reactKeyListeners.set(key, new Set());
+    }
+    const listener = callback as KeyListener;
+    reactKeyListeners.get(key)?.add(listener);
+    return () => {
+      reactKeyListeners.get(key)?.delete(listener);
+    };
+  }
+
+  function subscribeToAll(callback: () => void): () => void {
+    allListeners.add(callback);
+    return () => {
+      allListeners.delete(callback);
+    };
   }
 
   return {
     /** Deletes a key from state and notifies subscribers for that key. */
     delete<K extends keyof State>(key: K): void {
-      store.delete(key);
+      if (!(key in state)) {
+        return;
+      }
+      const previousValue = state[key];
+      const nextState = {...state};
+      delete nextState[key];
+      state = nextState as State;
+      notifyReactKey(key, undefined, previousValue);
+      notifyKey(key, undefined, previousValue);
+      notifyAll();
     },
 
     /** Retrieves a single state key without subscribing to changes. */
     get<K extends keyof State>(key: K): State[K] {
-      return store.get(key);
+      return state[key];
     },
 
     /** Retrieves the whole state object without subscribing to changes. */
     getAll(): State {
-      return store.getAll();
+      return state;
     },
 
     /** Returns whether a key currently exists in the store. */
     has<K extends keyof State>(key: K): boolean {
-      return store.has(key);
+      return key in state;
     },
 
     /** Registers a key listener and returns an unsubscribe function. */
     on<K extends keyof State>(key: K, callback: (state: State[K] | undefined, previousState: State[K] | undefined) => void): () => void {
-      return store.on(key, callback);
+      if (!keyListeners.has(key)) {
+        keyListeners.set(key, new Set());
+      }
+      const listener = callback as KeyListener;
+      keyListeners.get(key)?.add(listener);
+      return () => {
+        keyListeners.get(key)?.delete(listener);
+      };
     },
 
     /** Removes key listeners. If no callback is supplied all listeners for the key are removed. */
     off<K extends keyof State>(key: K, callback?: (state: State[K] | undefined, previousState: State[K] | undefined) => void): void {
-      store.off(key, callback);
+      if (!callback) {
+        keyListeners.delete(key);
+        return;
+      }
+      keyListeners.get(key)?.delete(callback as KeyListener);
     },
 
     /** Resets the whole store to the original initial state. */
     reset(): void {
-      store.reset();
+      const previousState = state;
+      state = getInitialState();
+      for (const key of reactKeyListeners.keys()) {
+        notifyReactKey(key, key in state ? state[key] : undefined, key in previousState ? previousState[key] : undefined);
+      }
+      for (const key of keyListeners.keys()) {
+        notifyKey(key, key in state ? state[key] : undefined, key in previousState ? previousState[key] : undefined);
+      }
+      notifyAll();
     },
 
     /** Sets one state key and notifies listeners when the value changes. */
-    set: setter,
+    set,
 
     /** Replaces the whole store state and notifies listeners for changed keys. */
     setAll(nextState: State): void {
-      store.setAll(nextState);
+      const previousState = state;
+      if (!Object.is(nextState, previousState)) {
+        state = nextState;
+        for (const key of reactKeyListeners.keys()) {
+          notifyReactKey(key, key in nextState ? nextState[key] : undefined, key in previousState ? previousState[key] : undefined);
+        }
+        notifyAll();
+      }
+      for (const key of keyListeners.keys()) {
+        notifyKey(key, key in nextState ? nextState[key] : undefined, key in previousState ? previousState[key] : undefined);
+      }
     },
 
     /** Updates a subset of the store and notifies listeners for changed keys. */
-    update(nextState: Partial<State>): void {
-      store.update(nextState);
+    update(partialState: Partial<State>): void {
+      const previousState = state;
+      const keys = Object.keys(partialState) as (keyof State)[];
+      if (!Object.is(partialState, previousState)) {
+        state = {...state, ...partialState};
+        for (const key of keys) {
+          notifyReactKey(key, state[key], previousState[key]);
+        }
+        notifyAll();
+      }
+      for (const key of keys) {
+        notifyKey(key, key in partialState ? partialState[key] : undefined, previousState[key]);
+      }
     },
 
     /** Works like React.useState for one key in the global store. */
@@ -225,26 +171,26 @@ export function createGlobalStore<State extends object>(initialState: State | ((
       defaultValue?: State[K],
       equalityFn?: EqualityFn<State[K]>,
     ): [State[K], (value: SetStateAction<State[K]>) => void] {
-      if (defaultValue !== undefined && !store.has(key)) {
-        setter(key, defaultValue);
+      if (defaultValue !== undefined && !(key in state)) {
+        set(key, defaultValue);
       }
-      const getSnapshot = () => store.get(key);
+      const getSnapshot = () => state[key];
       const defaultEqualityFn: EqualityFn<State[K]> = (left, right) => Object.is(left, right);
       const isEqual = equalityFn ?? defaultEqualityFn;
-      const subscribe = (listener: () => void) => store.subscribeToKey(key, (newValue, previousValue) => {
+      const subscribe = (listener: () => void) => subscribeToKey(key, (newValue, previousValue) => {
         if (!isEqual(previousValue, newValue)) {
           listener();
         }
       });
       const value = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-      const keySetter = useCallback((nextValue: SetStateAction<State[K]>) => setter(key, nextValue), [key]);
+      const keySetter = useCallback((nextValue: SetStateAction<State[K]>) => set(key, nextValue), [key]);
       return [value, keySetter];
     },
 
     /** Subscribes to the entire state object. */
     useAll(): State {
-      const getSnapshot = () => store.getAll();
-      const subscribe = (listener: () => void) => store.subscribeToAll(listener);
+      const getSnapshot = () => state;
+      const subscribe = (listener: () => void) => subscribeToAll(listener);
       return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
     },
   };
