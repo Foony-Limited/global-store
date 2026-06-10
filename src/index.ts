@@ -1,6 +1,9 @@
-import { type SetStateAction, useCallback, useSyncExternalStore } from 'react';
+import { type SetStateAction, useCallback, useRef, useSyncExternalStore } from 'react';
 
 export type EqualityFn<T> = (left: T | null | undefined, right: T | null | undefined) => boolean;
+
+/** Default `use` equality. Mirrors React's own snapshot comparison so gating is predictable. */
+const defaultEqualityFn: EqualityFn<unknown> = (left, right) => Object.is(left, right);
 
 type KeyListener = (newValue: unknown, previousValue: unknown) => void;
 
@@ -65,6 +68,11 @@ export function createGlobalStore<State extends object>(initialState: State | ((
     return () => {
       allListeners.delete(callback);
     };
+  }
+
+  /** Stable snapshot reader for `useAll` so React doesn't see a new getSnapshot each render. */
+  function getStateSnapshot(): State {
+    return state;
   }
 
   return {
@@ -165,7 +173,13 @@ export function createGlobalStore<State extends object>(initialState: State | ((
       }
     },
 
-    /** Works like React.useState for one key in the global store. */
+    /**
+     * Works like React.useState for one key in the global store.
+     *
+     * `equalityFn` is a re-render gate, NOT a value memoizer: store updates where it returns true
+     * won't re-render the component, but any re-render (from other hooks, parents, etc.) always
+     * reads the latest store value.
+     */
     use<K extends keyof State>(
       key: K,
       defaultValue?: State[K],
@@ -174,14 +188,17 @@ export function createGlobalStore<State extends object>(initialState: State | ((
       if (defaultValue !== undefined && !(key in state)) {
         set(key, defaultValue);
       }
-      const getSnapshot = () => state[key];
-      const defaultEqualityFn: EqualityFn<State[K]> = (left, right) => Object.is(left, right);
-      const isEqual = equalityFn ?? defaultEqualityFn;
-      const subscribe = (listener: () => void) => subscribeToKey(key, (newValue, previousValue) => {
-        if (!isEqual(previousValue, newValue)) {
+      // Track the latest equalityFn in a ref so the subscription stays referentially stable even
+      // when callers pass a new inline function on every render (avoids resubscribe churn).
+      const equalityFnRef = useRef(equalityFn);
+      equalityFnRef.current = equalityFn;
+      const getSnapshot = useCallback(() => state[key], [key]);
+      const subscribe = useCallback((listener: () => void) => subscribeToKey(key, (newValue, previousValue) => {
+        const isEqual = (equalityFnRef.current ?? defaultEqualityFn) as EqualityFn<State[K]>;
+        if (!isEqual(previousValue as State[K], newValue as State[K])) {
           listener();
         }
-      });
+      }), [key]);
       const value = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
       const keySetter = useCallback((nextValue: SetStateAction<State[K]>) => set(key, nextValue), [key]);
       return [value, keySetter];
@@ -189,9 +206,7 @@ export function createGlobalStore<State extends object>(initialState: State | ((
 
     /** Subscribes to the entire state object. */
     useAll(): State {
-      const getSnapshot = () => state;
-      const subscribe = (listener: () => void) => subscribeToAll(listener);
-      return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+      return useSyncExternalStore(subscribeToAll, getStateSnapshot, getStateSnapshot);
     },
   };
 }

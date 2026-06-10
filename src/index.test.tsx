@@ -1,5 +1,5 @@
 import { act, cleanup, render } from '@testing-library/react';
-import React from 'react';
+import React, { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createGlobalStore, type EqualityFn } from './index.js';
 
@@ -130,6 +130,47 @@ describe('createGlobalStore', () => {
 
     expect(store.get('count')).toBe(1);
     expect(store.getAll().label).toBe('b');
+  });
+
+  it('treats equalityFn as a re-render gate that always renders the latest value (Zustand semantics)', () => {
+    const store = createGlobalStore(createInitialState());
+    let renderCount = 0;
+    let renderedName = '';
+    let forceRerender: () => void = () => {};
+
+    function ProfileName() {
+      const [profile] = store.use('profile', undefined, profileIdEquals);
+      const [, setUnrelated] = useState(0);
+      forceRerender = () => setUnrelated(previous => previous + 1);
+      renderCount += 1;
+      renderedName = profile.name;
+      return null;
+    }
+
+    render(<ProfileName />);
+    expect(renderCount).toBe(1);
+    expect(renderedName).toBe('Ann');
+
+    // Same id → equalityFn says "equal" → the store update must NOT cause a re-render.
+    act(() => store.set('profile', { id: 'one', name: 'Beth' }));
+    expect(renderCount).toBe(1);
+    expect(renderedName).toBe('Ann');
+
+    // A re-render caused by some other hook must read the LATEST store value, not a stale value
+    // memoized by equalityFn.
+    act(() => forceRerender());
+    expect(renderCount).toBe(2);
+    expect(renderedName).toBe('Beth');
+
+    // Different id → equalityFn says "not equal" → re-render with the latest value.
+    act(() => store.set('profile', { id: 'two', name: 'Cara' }));
+    expect(renderCount).toBe(3);
+    expect(renderedName).toBe('Cara');
+
+    // The gate keeps working after a pull-based read: same id again → no re-render.
+    act(() => store.set('profile', { id: 'two', name: 'Dana' }));
+    expect(renderCount).toBe(3);
+    expect(renderedName).toBe('Cara');
   });
 
   it('renders one component once per store change when it subscribes to multiple keys', () => {
